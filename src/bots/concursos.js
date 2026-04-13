@@ -94,11 +94,19 @@ async function processar(tel, dados) {
 
     // ── AGUARDANDO PIX — não entra em loop ──────────────────
     case E.AGUARDA_PIX:
-      // Só repete o PIX se a pessoa digitar algo
-      // Não repete se for áudio, figurinha, etc.
       if (dados.tipo === 'texto' && txt.length > 0) {
         await zapi.texto(BOT, tel,
           `Ainda aguardando o comprovante! 😊\n\nChave PIX: *${cfg.pix}*\nValor: *${fmt(s.pedido?.valor || 19.90)}*\n\nApós pagar, envie o *print ou PDF* do comprovante aqui! 📸`
+        );
+      }
+      break;
+
+    // ── PIX ENVIADO — aguarda confirmação manual da equipe ───
+    case E.PIX_ENVIADO:
+      // Bot fica em silêncio. Responde só se o cliente perguntar algo.
+      if (dados.tipo === 'texto' && txt.length > 0) {
+        await zapi.texto(BOT, tel,
+          `Seu pedido já foi registrado! 😊\n\nNossa equipe está processando e enviará o material em breve.\n\n_Seg-Sex 8h-18h | Sáb 8h-12h_ ⏱️`
         );
       }
       break;
@@ -205,7 +213,7 @@ async function comboParacatu(tel, nome) {
   await wait(1200);
   await zapi.texto(BOT, tel, `🔥 *COMBO — Paracatu 2026*\n\n27 apostilas completas:\n🏥 7 Saúde | 📚 6 Educação\n🗂 6 Adm. | ⚖ 4 Jurídica | ⚙ 4 Técnica\n\n✅ Conteúdo conforme edital IBGP\n✅ Questões comentadas em cada uma`);
   await wait(1500);
-  await zapi.texto(BOT, tel, `💡 Separado: *R$ ${total}*\nCOMBO: *R$ ${fmt(cfg.paracatu.precoCombo)}*\n\n💰 Economia de *R$ ${eco}*! 🎁\n\n*1️⃣* ✅ Quero o COMBO — R$ 49,90\n*2️⃣* 🔍 Ver por cargo\n*3️⃣* ← Voltar`);
+  await zapi.texto(BOT, tel, `💡 Separado: *R$ ${total}*\nCOMBO: *${fmt(cfg.paracatu.precoCombo)}*\n\n💰 Economia de *R$ ${eco}*! 🎁\n\n*1️⃣* ✅ Quero o COMBO — R$ 49,90\n*2️⃣* 🔍 Ver por cargo\n*3️⃣* ← Voltar`);
 }
 
 async function fPCombo(tel, txt, s) {
