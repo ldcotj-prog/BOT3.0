@@ -1,16 +1,15 @@
 // zapi.js — Z-API com suporte multi-instância
-const axios = require('axios');
-const cfg   = require('./config');
+const axios   = require('axios');
+const cfg     = require('./config');
+const tracker = require('./tracker'); // rastreamento anti-autopause
 
-// Bot principal usado para enviar notificações ao atendente
 const BOT_NOTIF = () => cfg.BOTS.concursos.instanceId ? 'concursos' : Object.keys(cfg.BOTS)[0];
 
-// ── Envia texto para um cliente ──────────────────────────────
+// ── Envia texto para um cliente ───────────────────────────────────────
 async function texto(botId, tel, msg) {
   if (!msg || !tel || !botId) return;
-  // Registra que o BOT vai enviar para esse número agora
-  // Isso evita que o webhook fromMe:true pause o bot
-  if (global._marcarBotEnviou) global._marcarBotEnviou(botId, tel);
+  // Marca ANTES do envio — garante que fromMe seja ignorado
+  tracker.marcar(botId, tel);
   try {
     await axios.post(
       `${cfg.zapiUrl(botId)}/send-text`,
@@ -23,7 +22,7 @@ async function texto(botId, tel, msg) {
   }
 }
 
-// ── Envia link de apostila (Google Drive) ────────────────────
+// ── Envia link de apostila (Google Drive) ─────────────────────────────
 async function apostila(botId, tel, driveId, titulo, nome) {
   const url = cfg.driveLink(driveId);
   await texto(botId, tel,
@@ -31,9 +30,10 @@ async function apostila(botId, tel, driveId, titulo, nome) {
   );
 }
 
-// ── Envia notificação direta ao atendente (38999313182) ──────
+// ── Notificação direta ao atendente (38999313182) ─────────────────────
 async function notificarAtendente(msg) {
   const bot = BOT_NOTIF();
+  tracker.marcar(bot, cfg.atendente);
   try {
     await axios.post(
       `${cfg.zapiUrl(bot)}/send-text`,
@@ -46,7 +46,7 @@ async function notificarAtendente(msg) {
   }
 }
 
-// ── Notifica atendente sobre lead (pedido atendente / visita) ─
+// ── Notifica lead ao atendente ────────────────────────────────────────
 async function notificar(botId, tel, origem, extra) {
   const hora = new Date().toLocaleTimeString('pt-BR', {
     timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit',
@@ -63,7 +63,7 @@ _Clique no número pra responder!_ 👆`;
   await notificarAtendente(msg);
 }
 
-// ── Envia comprovante para confirmação manual ─────────────────
+// ── Comprovante para confirmação manual ───────────────────────────────
 async function comprovante(botId, tel, nome, produto, imgUrl) {
   const msg =
 `📨 *COMPROVANTE PARA CONFIRMAR*
@@ -72,16 +72,12 @@ async function comprovante(botId, tel, nome, produto, imgUrl) {
 📱 ${tel}
 🛒 ${produto}
 
-Para confirmar e liberar o material, responda:
-✅ *CONFIRMAR ${botId} ${tel}*
-
-Para recusar:
-❌ *RECUSAR ${botId} ${tel}*`;
-
+✅ CONFIRMAR ${botId} ${tel}
+❌ RECUSAR  ${botId} ${tel}`;
   await notificarAtendente(msg);
-
   if (imgUrl) {
     const bot = BOT_NOTIF();
+    tracker.marcar(bot, cfg.atendente);
     try {
       await axios.post(`${cfg.zapiUrl(bot)}/send-image`,
         { phone: String(cfg.atendente), image: imgUrl, caption: `Comprovante de ${nome || tel}` },
