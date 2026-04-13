@@ -5,7 +5,31 @@ const path    = require('path');
 const cfg     = require('./config');
 const { set, getSession } = require('./storage');
 
-// Importa cada bot
+// ────────────────────────────────────────────────────────────
+// CORREÇÃO CRÍTICA: Anti-auto-pause
+// O Z-API dispara fromMe:true para TODA mensagem enviada pela instância,
+// incluindo as que o próprio bot envia via API.
+// Sem esse tracker, o bot se pausa sozinho após cada mensagem que envia.
+// ────────────────────────────────────────────────────────────
+const botEnviouPara = new Map(); // "botId:tel" → timestamp
+
+function marcarBotEnviou(botId, tel) {
+  const k = `${botId}:${String(tel)}`;
+  botEnviouPara.set(k, Date.now());
+  setTimeout(() => botEnviouPara.delete(k), 15000); // TTL 15s
+}
+
+function botEnviouRecentemente(botId, tel) {
+  const ts = botEnviouPara.get(`${botId}:${String(tel)}`);
+  return !!(ts && (Date.now() - ts) < 12000);
+}
+
+// Expõe globalmente para o zapi.js registrar envios
+global._marcarBotEnviou = marcarBotEnviou;
+
+// ────────────────────────────────────────────────────────────
+// BOTS
+// ────────────────────────────────────────────────────────────
 const botConcursos   = require('./bots/concursos');
 const botVestibular  = require('./bots/vestibular');
 const botInformatica = require('./bots/informatica');
@@ -23,30 +47,21 @@ const BOTS = {
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// ── Landing pages ────────────────────────────────────────────
-app.get('/',           (_, r) => r.redirect('/produtos'));
-app.get('/produtos',   (_, r) => r.sendFile(path.join(__dirname, 'landing.html')));
-app.get('/health',     (_, r) => r.json({ ok: true, bots: Object.keys(BOTS) }));
+// ── Landing ───────────────────────────────────────────────────────────
+app.get('/',        (_, r) => r.redirect('/produtos'));
+app.get('/produtos',(_, r) => r.sendFile(path.join(__dirname, 'landing.html')));
+app.get('/health',  (_, r) => r.json({ ok: true, bots: Object.keys(BOTS), ts: new Date().toISOString() }));
 
-// ── Webhook por bot ──────────────────────────────────────────
-// Cada instância Z-API aponta para sua rota específica:
-//   /webhook/concursos
-//   /webhook/vestibular
-//   /webhook/informatica
-//   /webhook/online
+// ── Webhook por bot ───────────────────────────────────────────────────
 app.post('/webhook/:botId', async (req, res) => {
-  res.status(200).json({ ok: true }); // responde rápido
+  res.status(200).json({ ok: true }); // responde rápido para Z-API não reenviar
 
   try {
     const botId = req.params.botId;
     const bot   = BOTS[botId];
+    if (!bot) { console.warn(`[WH] botId desconhecido: ${botId}`); return; }
 
-    if (!bot) {
-      console.warn(`[WH] Bot desconhecido: ${botId}`);
-      return;
-    }
-
-    const b   = req.body;
+    const b = req.body;
     if (!b || b.isStatusReply) return;
 
     const tel = String(b.phone || '').replace(/\D/g, '');
@@ -54,71 +69,79 @@ app.post('/webhook/:botId', async (req, res) => {
 
     console.log(`\n[${botId.toUpperCase()}] fromMe:${b.fromMe} | ${tel} | "${txt.slice(0, 60)}"`);
 
-    // ── Mensagem enviada pelo atendente → pausa o bot ─────────
+    // ── Mensagem com fromMe:true ─────────────────────────────────────
     if (b.fromMe === true || b.fromMe === 'true') {
+
+      // BOT ON — reativa o bot para um número
       if (txt.toUpperCase().startsWith('BOT ON ')) {
         const alvo = txt.split(' ')[2]?.trim().replace(/\D/g, '');
-        if (alvo) { set(botId, alvo, { humano: false }); console.log(`[${botId}] ✅ Bot reativado → ${alvo}`); }
-      } else if (tel) {
+        if (alvo) {
+          set(botId, alvo, { humano: false });
+          console.log(`[${botId}] ✅ Bot reativado → ${alvo}`);
+        }
+        return;
+      }
+
+      // Se foi o próprio BOT que enviou (via API), ignora — não pausa
+      if (tel && botEnviouRecentemente(botId, tel)) {
+        console.log(`[${botId}] 🤖 fromMe ignorado (foi o próprio bot) → ${tel}`);
+        return;
+      }
+
+      // Foi o ATENDENTE que enviou manualmente pelo WhatsApp — pausa o bot
+      if (tel) {
         set(botId, tel, { humano: true });
-        console.log(`[${botId}] 🤝 Bot pausado → ${tel}`);
+        console.log(`[${botId}] 🤝 Bot pausado (atendente respondeu) → ${tel}`);
       }
       return;
     }
 
     if (!tel) return;
 
-    // ── Comando PAUSAR ─────────────────────────────────────
+    // ── Comando PAUSAR (manual) ──────────────────────────────────────
     if (txt.toUpperCase().startsWith('PAUSAR ')) {
       const alvo = txt.split(' ')[1]?.trim().replace(/\D/g, '');
-      if (alvo) { set(botId, alvo, { humano: true }); console.log(`[${botId}] 🔕 Pausado via cmd → ${alvo}`); }
+      if (alvo) { set(botId, alvo, { humano: true }); console.log(`[${botId}] 🔕 Pausado → ${alvo}`); }
       return;
     }
 
-    // ── Comandos CONFIRMAR / RECUSAR (confirmação manual de PIX) ──
-    // Formato: CONFIRMAR concursos 5538XXXXX
-    //          RECUSAR   concursos 5538XXXXX
+    // ── Comandos CONFIRMAR / RECUSAR ─────────────────────────────────
     if (txt.toUpperCase().startsWith('CONFIRMAR ') || txt.toUpperCase().startsWith('RECUSAR ')) {
       const partes = txt.trim().split(/\s+/);
       const acao   = partes[0].toUpperCase();
-      // Suporta com ou sem botId: "CONFIRMAR 5538XXX" ou "CONFIRMAR concursos 5538XXX"
       const alvo   = (partes.length >= 3 ? partes[2] : partes[1])?.replace(/\D/g, '');
       const bAlvo  = partes.length >= 3 ? partes[1] : botId;
       if (alvo && BOTS[bAlvo]) {
         const sAlvo = getSession(bAlvo, alvo);
         if (acao === 'CONFIRMAR' && sAlvo.pedido) {
-          const bot2 = BOTS[bAlvo];
-          if (bot2.confirmarPedido) await bot2.confirmarPedido(alvo, sAlvo);
-          console.log(`[${bAlvo}] ✅ Pedido confirmado manualmente → ${alvo}`);
+          if (BOTS[bAlvo].confirmarPedido) await BOTS[bAlvo].confirmarPedido(alvo, sAlvo);
+          console.log(`[${bAlvo}] ✅ Pedido confirmado → ${alvo}`);
         } else if (acao === 'RECUSAR') {
           set(bAlvo, alvo, { etapa: 'aguarda_pix' });
-          const bot2 = BOTS[bAlvo];
-          if (bot2.recusarPedido) await bot2.recusarPedido(alvo, sAlvo);
+          if (BOTS[bAlvo].recusarPedido) await BOTS[bAlvo].recusarPedido(alvo, sAlvo);
           console.log(`[${bAlvo}] ❌ Pedido recusado → ${alvo}`);
         }
       }
       return;
     }
 
-    // ── Verifica se bot está pausado para esse número ─────────
+    // ── Bot pausado para este número ─────────────────────────────────
     const s = getSession(botId, tel);
     if (s.humano) {
       console.log(`[${botId}] 🔕 Ignorado (humano ativo) → ${tel}`);
       return;
     }
 
-    // ── Extrai dados da mensagem ──────────────────────────────
+    // ── PIX_ENVIADO — aguarda confirmação manual ─────────────────────
     const dados = extrair(b);
     if (!dados) return;
 
-    // ── Se está em PIX_ENVIADO, só aceita confirmação via comando
-    // do atendente — ignora mensagens do cliente para evitar loop
-    if (s.etapa === 'pix_enviado' && dados.tipo === 'texto') {
-      console.log(`[${botId}] ⏳ PIX_ENVIADO — aguardando confirmação manual → ${tel}`);
+    if (s.etapa === 'sec_pix_enviado' && dados.tipo === 'texto') {
+      console.log(`[${botId}] ⏳ PIX_ENVIADO — aguardando confirmação → ${tel}`);
       return;
     }
 
-    // ── Processa no bot correto ───────────────────────────────
+    // ── Processa ─────────────────────────────────────────────────────
     await bot.processar(tel, dados);
 
   } catch (e) {
@@ -126,12 +149,10 @@ app.post('/webhook/:botId', async (req, res) => {
   }
 });
 
-// ── Suporte ao webhook antigo (redireciona para concursos) ────
+// ── Webhook legado (redireciona para concursos) ───────────────────────
 app.post('/webhook', async (req, res) => {
-  req.params = { botId: 'concursos' };
-  // Re-usa a mesma lógica chamando a rota /webhook/concursos
-  const b   = req.body;
   res.status(200).json({ ok: true });
+  const b = req.body;
   if (!b || b.isStatusReply) return;
   const tel = String(b.phone || '').replace(/\D/g, '');
   const txt = b.text?.message || b.message || '';
@@ -139,7 +160,9 @@ app.post('/webhook', async (req, res) => {
     if (txt.toUpperCase().startsWith('BOT ON ')) {
       const alvo = txt.split(' ')[2]?.trim().replace(/\D/g, '');
       if (alvo) set('concursos', alvo, { humano: false });
-    } else if (tel) set('concursos', tel, { humano: true });
+    } else if (tel && !botEnviouRecentemente('concursos', tel)) {
+      set('concursos', tel, { humano: true });
+    }
     return;
   }
   if (!tel) return;
@@ -150,9 +173,9 @@ app.post('/webhook', async (req, res) => {
   await botConcursos.processar(tel, dados);
 });
 
-// ── Extrai dados da mensagem Z-API ────────────────────────────
+// ── Extrai dados da mensagem Z-API ────────────────────────────────────
 function extrair(b) {
-  if (b.text?.message)  return { tipo: 'texto', conteudo: b.text.message };
+  if (b.text?.message) return { tipo: 'texto', conteudo: b.text.message };
 
   if (b.image) {
     const url = b.image.imageUrl || b.image.url || b.image.downloadUrl
@@ -162,31 +185,25 @@ function extrair(b) {
   }
 
   if (b.document) {
-    const url = b.document.documentUrl || b.document.url
-             || b.document.downloadUrl || b.document.mediaUrl || '';
+    const url  = b.document.documentUrl || b.document.url
+              || b.document.downloadUrl || b.document.mediaUrl || '';
     const nome = (b.document.fileName || b.document.name || '').toLowerCase();
-    const caption = b.document.caption || '';
-
-    // PDF enviado como comprovante → trata como "comprovante"
-    const ehComprovante = nome.includes('comprovante') || nome.includes('pix')
-      || nome.includes('pagamento') || nome.includes('recibo')
-      || nome.endsWith('.pdf') || nome.endsWith('.jpg') || nome.endsWith('.png');
-
-    if (ehComprovante && url) {
-      console.log(`[WH] PDF comprovante detectado: ${nome}`);
-      return { tipo: 'comprovante_pdf', conteudo: url, caption };
-    }
-    return { tipo: 'documento', conteudo: url, caption };
+    const ehPdf = nome.endsWith('.pdf') || nome.includes('comprovante')
+               || nome.includes('pix') || nome.includes('pagamento');
+    if (ehPdf && url) return { tipo: 'comprovante_pdf', conteudo: url, caption: b.document.caption || '' };
+    // Qualquer documento quando estiver aguardando PIX → trata como comprovante
+    if (url) return { tipo: 'documento', conteudo: url, caption: b.document.caption || '' };
+    return null;
   }
 
   if (b.audio) return { tipo: 'texto', conteudo: '[áudio]' };
   return null;
 }
 
-// ── Inicia servidor ───────────────────────────────────────────
+// ── Servidor ─────────────────────────────────────────────────────────
 app.listen(cfg.port, () => {
   console.log('\n╔══════════════════════════════════════════════════╗');
-  console.log('║  🤖  JARVIS v5.0 Multi-Bot — Smart Cursos Unaí  ║');
+  console.log('║  🤖  JARVIS v5.1 Multi-Bot — Smart Cursos Unaí  ║');
   console.log('╠══════════════════════════════════════════════════╣');
   console.log(`║  Porta: ${cfg.port}                                      ║`);
   console.log('╠══════════════════════════════════════════════════╣');
@@ -198,7 +215,9 @@ app.listen(cfg.port, () => {
   console.log('║  /webhook/secretaria  → Secretaria (principal)   ║');
   console.log('╠══════════════════════════════════════════════════╣');
   console.log('║  Comandos (envie pelo WhatsApp do bot):          ║');
-  console.log('║  PAUSAR 5538XXXXX  → pausa o bot                ║');
-  console.log('║  BOT ON 5538XXXXX  → reativa o bot              ║');
+  console.log('║  PAUSAR 5538XXXXX  → pausa para um número       ║');
+  console.log('║  BOT ON 5538XXXXX  → reativa para um número     ║');
+  console.log('║  CONFIRMAR concursos 5538XXXXX → confirma PIX   ║');
+  console.log('║  RECUSAR  concursos 5538XXXXX  → recusa PIX     ║');
   console.log('╚══════════════════════════════════════════════════╝\n');
 });
