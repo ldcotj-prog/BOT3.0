@@ -132,14 +132,16 @@ app.post('/webhook/:botId', async (req, res) => {
       return;
     }
 
-    // ── PIX_ENVIADO — aguarda confirmação manual ─────────────────────
+    // ── PIX_ENVIADO — encaminha para o bot responder gentilmente ────────
     const dados = extrair(b);
     if (!dados) return;
 
     if (s.etapa === 'sec_pix_enviado' && dados.tipo === 'texto') {
-      console.log(`[${botId}] ⏳ PIX_ENVIADO — aguardando confirmação → ${tel}`);
+      // Secretaria: silêncio total (o cliente já foi informado que a equipe vai entrar em contato)
+      console.log(`[${botId}] ⏳ sec_pix_enviado — ignorando texto → ${tel}`);
       return;
     }
+    // pix_enviado (concursos): o bot tem um case específico que responde gentilmente
 
     // ── Processa ─────────────────────────────────────────────────────
     await bot.processar(tel, dados);
