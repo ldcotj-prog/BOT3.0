@@ -8,6 +8,9 @@ const BOT_NOTIF = () => cfg.BOTS.concursos.instanceId ? 'concursos' : Object.key
 // ── Envia texto para um cliente ──────────────────────────────
 async function texto(botId, tel, msg) {
   if (!msg || !tel || !botId) return;
+  // Registra que o BOT vai enviar para esse número agora
+  // Isso evita que o webhook fromMe:true pause o bot
+  if (global._marcarBotEnviou) global._marcarBotEnviou(botId, tel);
   try {
     await axios.post(
       `${cfg.zapiUrl(botId)}/send-text`,
@@ -89,4 +92,3 @@ Para recusar:
 }
 
 module.exports = { texto, apostila, notificar, notificarAtendente, comprovante };
-
